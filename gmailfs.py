@@ -6,7 +6,7 @@
 #    Copyright (C) 2004  Richard Jones  <richard followed by funny at sign then jones then a dot then name>
 #    Copyright (C) 2010  Dave Hansen <dave@sr71.net>
 #
-#    GmailFS - Gmail Filesystem Version 0.8.5
+#    GmailFS - Gmail Filesystem Version 0.8.6
 #    This program can be distributed under the terms of the GNU GPL.
 #    See the file COPYING.
 #
