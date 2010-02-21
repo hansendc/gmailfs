@@ -201,7 +201,7 @@ def log_imap2(str):
 def log_info(s):
 	if not am_lead_thread():
 		return
-	log.info("[%s] %s" % (str(time.time()), s))
+	log.info("[%.2f] %s" % (time.time(), s))
 	#print str
 	#str += "\n"
 	#sys.stderr.write(str)
@@ -439,6 +439,27 @@ class testthread(Thread):
 		self.fs = fs
 		self.nr = nr
 
+	def write_out_object(self):
+		try:
+			# block, and timeout after 1 second
+			object = self.fs.dirty_objects.get(1, 1)
+		except:
+			# effectively success
+			return 0
+		# we do not want to sit here sleeping on objects
+		# so if we can not get the lock, move on to another
+		# object
+		got_lock = object.writeout_lock.acquire(0)
+		if not got_lock:
+			self.fs.dirty_objects.put(object)
+			return -1
+		reason = Dirtyable.dirty_reason(object)
+		write_out_nolock(object, "bdflushd")
+		object.writeout_lock.release()
+		size = self.fs.dirty_objects.qsize()
+		print("[%d] wrote out %s, because '%s' %d left" % (thread.get_ident(), object.to_str(), reason, size))
+		return 0
+
 	def run(self):
 		global do_writeout
 		writeout_threads[thread.get_ident()] = 1
@@ -446,16 +467,18 @@ class testthread(Thread):
 		print "connected"
 		log_debug1("connected")
 		while do_writeout:
-			dirty = 0
-			try:
-				# block, and timeout after 1 second
-				object = self.fs.dirty_objects.get(1, 1)
-			except:
-				continue
-			write_out(object, "bdflushd")
-			size = self.fs.dirty_objects.qsize()
-			reason = Dirtyable.dirty_reason(object)
-			#print("[%d] wrote out %s, because '%s' %d left" % (thread.get_ident(), object.to_str(), reason, size))
+			tries = 5
+			for try_nr in range(tries):
+				ret = self.write_out_object()
+				if ret == 0:
+					break
+				# this will happen when there are
+				# objects in the queue for which
+				# we can not get the lock.  Do
+				# not spin, sleep instead
+				if try_nr >= tries-1:
+					time.sleep(1)
+
 	       	print "mythread done"
 
     #@-node:mythread
@@ -550,7 +573,7 @@ def getSingleMsguidByQuery(imap, q):
         if nr != 1:
 	  qstr = string.join(q, " ")
 	  # this is debug because it's normal to have non-existent files
-          log_debug2("could not find inode for query: '%s' (found %d)" % (qstr, nr))
+          log_debug2("could not find messages for query: '%s' (found %d)" % (qstr, nr))
           return -1;
  	log_debug2("getSingleMsguidByQuery('%s') ret: '%s' nr: %d" % (string.join(q," "), msgids[0], nr))
 	return int(msgids[0])
@@ -636,22 +659,28 @@ def _logException(msg):
 
 # Maybe I'm retarded, but I couldn't get this to work
 # with python inheritance.  Oh, well.
-def write_out(o, desc):
+def write_out_nolock(o, desc):
 	if not o.dirty():
-		log_debug2("inode is not dirty, not writing out")
-		return -1
-	if not o.writeout_lock.acquire(0):
-		log_debug1("unable to get inode lock (%s)" % (desc))
-		# someone else is writing this out
-		return -2
+		log_debug2("object is not dirty, not writing out")
+		return 0
 	if isinstance(o, GmailInode):
 		ret = o.i_write_out(desc)
 	if isinstance(o, GmailDirent):
 		ret = o.d_write_out(desc)
 	if isinstance(o, OpenGmailFile):
 		ret = o.f_write_out(desc)
+	cleared = "none"
 	if ret == 0:
-		o.__dirty = ""
+		cleared = o.clear_dirty()
+	log_debug1("write_out() finished '%s' (cleared '%s')" % (desc, cleared))
+	return ret
+
+def write_out(o, desc):
+	if not o.writeout_lock.acquire():
+		log_debug1("unable to get inode lock (%s)" % (desc))
+		# someone else is writing this out
+		return -2
+	ret = write_out_nolock(o, desc)
 	o.writeout_lock.release()
 	return ret
 
@@ -667,11 +696,18 @@ class Dirtyable(object):
 	def dirty_reason(self):
     		return self.__dirty
 
+	def clear_dirty(self):
+    		cleared = self.__dirty
+		self.__dirty = ""
+		return cleared
+
 	def mark_dirty(self, desc):
-		log_debug1("mark_dirty('%s') %s" % (self.to_str(), desc))
+		log_debug1("mark_dirty('%s') because '%s'" % (self.to_str(), desc))
 		self.writeout_lock.acquire()
 		if len(self.__dirty) == 0:
 			self.fs.dirty_objects.put(self)
+		else:
+			log_debug1("already in queue: mark_dirty('%s') because '%s'" % (self.to_str(), desc))
 		self.__dirty = desc
 		self.writeout_lock.release()
 
@@ -890,17 +926,17 @@ class GmailInode(Dirtyable):
 	log_debug2("filling inode")
 	if self.inode_msg.is_multipart():
 		body = self.inode_msg.preamble
-		log_debug("message was multipart, reading body from preamble")
+		log_debug2("message was multipart, reading body from preamble")
 	else:
 		# this is a bug
-		log_debug("message was single part")
-        log_debug3("body: ->%s<-" % body)
+		log_debug2("message was single part")
+        log_debug2("body: ->%s<-" % body)
 	body = fixQuotedPrintable(body)
 	##
 	subj_hash = self.fs.parse_inode_msg_subj(self.inode_msg)
         self.version = subj_hash[VersionTag]
         self.ino = int(subj_hash[InodeTag])
-	log_debug2("set self.ino to: '%d' '%s'" % (self.ino, str(subj_hash[InodeTag])))
+	log_debug2("set self.ino to: int: '%d' str: '%s'" % (self.ino, str(subj_hash[InodeTag])))
         self.dev =     subj_hash[DevTag]
         self.i_nlink =   subj_hash[NumberLinksTag]
         #quotedEquals = "=(?:3D)?(.*)"
@@ -914,7 +950,7 @@ class GmailInode(Dirtyable):
 	                  CtimeTag + quotedEquals + ' ' +
 	                  BSizeTag + quotedEquals + ' ' +
 			  SymlinkTag + "=" + LinkStartDelim  + '(.*)' + LinkEndDelim)
-        log_debug3("restr: ->%s<-" % (restr))
+        log_debug2("restr: ->%s<-" % (restr))
 	m = re.search(re.compile(restr, re.DOTALL), body)
 	self.mode  = int(m.group(1))
         self.uid   = int(m.group(2))
@@ -926,6 +962,7 @@ class GmailInode(Dirtyable):
         self.blocksize = int(m.group(8))
 	symlink_tmp    = m.group(9)
 	self.symlink_tgt = _pathSeparatorDecode(symlink_tmp)
+	log_debug2("filled inode size: %d" % self.size)
 	self.fill_xattrs()
 
 #@-node:class GmailInode
@@ -972,7 +1009,9 @@ class OpenGmailFile(Dirtyable):
         towrite = buflen
 
         if self.currentOffset == -1 or off<self.currentOffset or off>self.currentOffset:
+            log_debug1("beginning new write")
             write_out(self, "begin new write")
+            log_debug1("beginning new write done")
             self.currentOffset = off;
             self.buffer = self.readFromGmail(self.currentOffset/self.blocksize,1)
 
@@ -980,13 +1019,13 @@ class OpenGmailFile(Dirtyable):
         written = 0
         while towrite>0:
             thiswrote = min(towrite,min(self.blocksize-(self.currentOffset%self.blocksize),self.blocksize))
-            log_debug2("wrote "+str(thiswrote)+" bytes off:"+str(off)+" self.currentOffset:"+str(self.currentOffset))
+            log_debug1("wrote %d bytes at offset: %d self.currentOffset: %d" % (thiswrote, off, self.currentOffset))
             self.buffer[self.currentOffset%self.blocksize:] = buf[written:written+thiswrote]
             towrite -= thiswrote
             written += thiswrote
             self.currentOffset += thiswrote
             self.lastBlock = currentBlock
-	    log_debug2("write() setting dirty")
+	    log_debug1("write() setting dirty")
 	    self.mark_dirty("file write")
 	    self.inode.mark_dirty("file write")
             if self.currentOffset / self.blocksize > currentBlock:
