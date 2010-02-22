@@ -454,11 +454,14 @@ class testthread(Thread):
 			self.fs.dirty_objects.put(object)
 			return -1
 		reason = Dirtyable.dirty_reason(object)
-		write_out_nolock(object, "bdflushd")
+		ret = write_out_nolock(object, "bdflushd")
 		object.writeout_lock.release()
 		size = self.fs.dirty_objects.qsize()
-		print("[%d] wrote out %s, because '%s' %d left" % (thread.get_ident(), object.to_str(), reason, size))
-		return 0
+		# 0 means it got written out
+		# 1 means it was not dirty
+		if ret == 0:
+			print("[%d] wrote out %s, because '%s' %d left" % (thread.get_ident(), object.to_str(), reason, size))
+		return 1
 
 	def run(self):
 		global do_writeout
@@ -470,7 +473,7 @@ class testthread(Thread):
 			tries = 5
 			for try_nr in range(tries):
 				ret = self.write_out_object()
-				if ret == 0:
+				if ret >= 0:
 					break
 				# this will happen when there are
 				# objects in the queue for which
@@ -660,9 +663,10 @@ def _logException(msg):
 # Maybe I'm retarded, but I couldn't get this to work
 # with python inheritance.  Oh, well.
 def write_out_nolock(o, desc):
-	if not o.dirty():
-		log_debug2("object is not dirty, not writing out")
-		return 0
+	dirty_token = o.dirty()
+	if not dirty_token:
+		log_debug1("object is not dirty (%s), not writing out" % (str(dirty_token)))
+		return 1
 	if isinstance(o, GmailInode):
 		ret = o.i_write_out(desc)
 	if isinstance(o, GmailDirent):
@@ -671,7 +675,7 @@ def write_out_nolock(o, desc):
 		ret = o.f_write_out(desc)
 	cleared = "none"
 	if ret == 0:
-		cleared = o.clear_dirty()
+		cleared = o.clear_dirty(dirty_token)
 	log_debug1("write_out() finished '%s' (cleared '%s')" % (desc, cleared))
 	return ret
 
@@ -687,29 +691,30 @@ def write_out(o, desc):
 class Dirtyable(object):
 	def __init__(self):
 		log_debug3("Dirtyable.__init__() '%s'" % (self))
-	        self.__dirty = ""
+		self.dirty_reasons = Queue.Queue(50)
 		self.writeout_lock = thread.allocate_lock()
 
 	def dirty(self):
-    		return (len(self.__dirty) != 0)
+    		return self.dirty_reasons.qsize()
 
 	def dirty_reason(self):
-    		return self.__dirty
+    		return "%s (%d more)" % (self.__dirty, self.dirty())
 
-	def clear_dirty(self):
-    		cleared = self.__dirty
-		self.__dirty = ""
-		return cleared
+	def clear_dirty(self, nr):
+		msgs = []
+		log_info("clearing %d dirty reasons" % (nr))
+		for msg_nr in range(nr):
+			d_msg = self.dirty_reasons.get_nowait()
+			log_info("dirty reason[%d]: %s" % (msg_nr, d_msg))
+			msgs.append(d_msg)
+		msg = "(%s)" % string.join(msgs, ", ")
+		return msg
 
 	def mark_dirty(self, desc):
-		log_debug1("mark_dirty('%s') because '%s'" % (self.to_str(), desc))
-		self.writeout_lock.acquire()
-		if len(self.__dirty) == 0:
-			self.fs.dirty_objects.put(self)
-		else:
-			log_debug1("already in queue: mark_dirty('%s') because '%s'" % (self.to_str(), desc))
 		self.__dirty = desc
-		self.writeout_lock.release()
+		self.dirty_reasons.put(desc)
+		self.fs.dirty_objects.put(self)
+		log_debug1("mark_dirty('%s') because '%s' (%d)" % (self.to_str(), desc, self.dirty_reasons.qsize()))
 
 	def to_str(self):
 		return "Dirtyable.to_str()"
@@ -1009,9 +1014,7 @@ class OpenGmailFile(Dirtyable):
         towrite = buflen
 
         if self.currentOffset == -1 or off<self.currentOffset or off>self.currentOffset:
-            log_debug1("beginning new write")
             write_out(self, "begin new write")
-            log_debug1("beginning new write done")
             self.currentOffset = off;
             self.buffer = self.readFromGmail(self.currentOffset/self.blocksize,1)
 
@@ -1089,6 +1092,8 @@ class OpenGmailFile(Dirtyable):
 	   log_debug2("still to read: "+str(toread)+" upto now: " + str(upto))
 	log_debug3("joined outbuf: ->%s<-" % string.join(outbuf, ""))
         return outbuf
+
+def get_inode_block_msgids
 
     def readFromGmail(self,readblock,deleteAfter):
         """
