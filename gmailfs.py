@@ -104,7 +104,6 @@ InlineInodeMax = 32 * 1024
 # a bit too much.
 DefaultBlockSize = 16 * 1024 * 1024
 
-
 SystemConfigFile = "/etc/gmailfs/gmailfs.conf"
 UserConfigFile = abspath(expanduser("~/.gmailfs.conf"))
 
@@ -193,7 +192,7 @@ def log_debug3(str):
 	return
 
 def log_imap(str):
-	log_debug2("IMAP: " + str)
+	log_debug1("IMAP: " + str)
 
 def log_imap2(str):
 	log_debug2("IMAP: " + str)
@@ -667,16 +666,17 @@ def write_out_nolock(o, desc):
 	if not dirty_token:
 		log_debug1("object is not dirty (%s), not writing out" % (str(dirty_token)))
 		return 1
+	clear_msg = "none"
+	clear_msg = o.clear_dirty(dirty_token)
 	if isinstance(o, GmailInode):
 		ret = o.i_write_out(desc)
 	if isinstance(o, GmailDirent):
 		ret = o.d_write_out(desc)
 	if isinstance(o, OpenGmailFile):
 		ret = o.f_write_out(desc)
-	cleared = "none"
-	if ret == 0:
-		cleared = o.clear_dirty(dirty_token)
-	log_debug1("write_out() finished '%s' (cleared '%s')" % (desc, cleared))
+	if ret != 0:
+		o.mark_dirty("failed writeout");
+	log_debug1("write_out() finished '%s' (cleared '%s')" % (desc, clear_msg))
 	return ret
 
 def write_out(o, desc):
@@ -691,7 +691,8 @@ def write_out(o, desc):
 class Dirtyable(object):
 	def __init__(self):
 		log_debug3("Dirtyable.__init__() '%s'" % (self))
-		self.dirty_reasons = Queue.Queue(50)
+		self.dirty_reasons = Queue.Queue(1<<20)
+		self.dirty_mark = Queue.Queue(1)
 		self.writeout_lock = thread.allocate_lock()
 
 	def dirty(self):
@@ -708,13 +709,20 @@ class Dirtyable(object):
 			log_info("dirty reason[%d]: %s" % (msg_nr, d_msg))
 			msgs.append(d_msg)
 		msg = "(%s)" % string.join(msgs, ", ")
+		orig_reason = self.dirty_mark.get_nowait();
+		log_info("cleared original dirty reason: '%s'" % (orig_reason))
 		return msg
 
 	def mark_dirty(self, desc):
 		self.__dirty = desc
 		self.dirty_reasons.put(desc)
-		self.fs.dirty_objects.put(self)
-		log_debug1("mark_dirty('%s') because '%s' (%d)" % (self.to_str(), desc, self.dirty_reasons.qsize()))
+		try:
+			self.dirty_mark.put_nowait(desc);
+			self.fs.dirty_objects.put(self)
+		except:
+			log_debug("mark_dirty('%s') skipped global list, already dirty" % (self.to_str()))
+		log_debug1("mark_dirty('%s') because '%s' (%d reasons)" %
+				(self.to_str(), desc, self.dirty_reasons.qsize()))
 
 	def to_str(self):
 		return "Dirtyable.to_str()"
@@ -1093,8 +1101,6 @@ class OpenGmailFile(Dirtyable):
 	log_debug3("joined outbuf: ->%s<-" % string.join(outbuf, ""))
         return outbuf
 
-def get_inode_block_msgids
-
     def readFromGmail(self,readblock,deleteAfter):
         """
         Read data block with block number 'readblock' for this file from users gmail account, if 'deleteAfter' is
@@ -1153,13 +1159,13 @@ class Gmailfs(Fuse):
             username = username+"@gmail.com"
         imap.login(username, password)
 	resp, data = imap.select(fsNameVar)
-	#log_debug1("folder select '%s' resp: '%s' data: '%s'" % (fsNameVar, resp, data))
+	log_debug1("folder select '%s' resp: '%s' data: '%s'" % (fsNameVar, resp, data))
 	if resp == "NO":
-		#log_info("creating mailbox")
+		log_info("creating mailbox")
 		resp, data = imap.create(fsNameVar)
-		#log_debug1("create '%s' resp: '%s' data: '%s'" % (fsNameVar, resp, data))
+		log_debug1("create '%s' resp: '%s' data: '%s'" % (fsNameVar, resp, data))
 		resp, data = imap.select(fsNameVar)
-		#log_debug1("select2 '%s' resp: '%s' data: '%s'" % (fsNameVar, resp, data))
+		log_debug1("select2 '%s' resp: '%s' data: '%s'" % (fsNameVar, resp, data))
 		return
 	imap.lock = threading.Semaphore(1)
 	return imap
@@ -1255,18 +1261,28 @@ class Gmailfs(Fuse):
 	trash_all = 0
 	#trash_all = 1
 	if trash_all:
-		log_info("deleting existing messages...")
+		print("deleting existing messages...")
 		self.imap.lock.acquire()
 		resp, msgids = self.imap.uid("SEARCH", 'ALL')
 		self.imap.lock.release()
 		uids = msgids[0].split()
-		log_info("%d found..." % (len(uids)))
+		print ("%d found..." % (len(uids)))
 		joined_uids = string.join(msgids[0].split(), ",")
 		log_debug2("about to delete msgids: ->%s<-" % (joined_uids))
 		if (len(uids)):
 			imap_trash_uids(self.imap, uids)
-		log_info("done deleting %d existing messages" % (len(msgids[0].split())))
-		#exit(0)
+		print("done deleting %d existing messages" % (len(msgids[0].split())))
+		self.imap.lock.acquire()
+		resp, msgids = self.imap.uid("SEARCH", 'ALL')
+		self.imap.lock.release()
+		print("mailbox now has %d messages" % (len(msgids[0].split())))
+		self.imap.expunge()
+
+	self.imap.lock.acquire()
+	resp, msgids = self.imap.uid("SEARCH", 'ALL')
+	self.imap.lock.release()
+	print("mailbox now has %d messages" % (len(msgids[0].split())))
+	#exit(0)
 	#elf.mythread()
 
         pass
