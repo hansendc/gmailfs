@@ -215,6 +215,11 @@ def log_debug3(str):
 		log_info(str)
 	return
 
+def log_debug4(str):
+	if debug >= 4:
+		log_info(str)
+	return
+
 def log_imap(str):
 	log_debug2("IMAP: " + str)
 
@@ -312,7 +317,7 @@ def uid_cmd(imap, cmd, uids, arg1, arg2 = None, arg3 = None):
 def __uid_cmd(imap, cmd, uids, arg1, arg2 = None, arg3 = None):
 	uids_str = string.join(uids, ",")
 	start = time.time()
-	log_info("__uid_cmd(%s,...)" % (cmd))
+	log_info("__uid_cmd(%s,...) %d uids" % (cmd, len(uids)))
     	rsp, rsp_data = imap.uid(cmd, uids_str, arg1, arg2, arg3)
 	log_imap_time(cmd, start);
 	log_info("__uid_cmd(%s, [%s]) ret: '%s'" % (cmd, uids_str, rsp))
@@ -321,14 +326,21 @@ def __uid_cmd(imap, cmd, uids, arg1, arg2 = None, arg3 = None):
 		return None
 	ret = {}
 	uid_index = 0
+	for one_rsp_data in rsp_data:
+		log_debug3("rsp_data[%d]: ->%s<-" % (uid_index, one_rsp_data))
+		uid_index += 1
+	uid_index = 0
 	for rsp_nr in range(len(rsp_data)):
 		data = rsp_data[rsp_nr]
 		# I don't know if this is expected or
 		# not, but every other response is just
 		# a plain ')' char.  Skip them
-		#
-		# should I use isinstance?
-		if data == ")":
+		log_debug3("about to lookup uids[%d] data class: '%s'" % (uid_index, data.__class__.__name__))
+		if isinstance(data, tuple):
+			log_debug4("is tuple")
+			for tval in data:
+				log_debug4("tval: ->%s<- class: '%s'" % (str(tval), tval.__class__.__name__))
+		if isinstance(data, str):
 			continue
 		uid = uids[uid_index]
 		uid_index += 1
