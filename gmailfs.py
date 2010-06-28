@@ -105,7 +105,7 @@ InlineInodeMax = 32 * 1024
 # I tried 64MB for this, but the base64-encoded
 # blocks end up about 90MB per message, which is
 # a bit too much, and gmail rejects them.
-DefaultBlockSize = 1 * 1024 * 1024
+DefaultBlockSize = 512 * 1024
 
 # How many blocks can we cache at once
 BlockCacheSize = 100
@@ -162,11 +162,13 @@ writeout_threads = {}
 def abort():
 	global do_writeout
 	do_writeout = 0
-	for t in writeout_threads:
-		print "abort joining thread..."
-		t.join()
-		print "done joining thread"
+	#for t in writeout_threads:
+	#	print "abort joining thread..."
+	#	t.join()
+	#	print "done joining thread"
 	exit(0)
+
+sem_msg = {}
 
 def semget(sem):
 	tries = 0
@@ -174,8 +176,12 @@ def semget(sem):
 		tries = tries + 1
 		time.sleep(1)
 		if tries % 60 == 0:
-			print("hung on lock for %d seconds" % (tries))
+			print("[%d] hung on lock for %d seconds (holder: %s)" % (thread.get_ident(), tries, sem_msg[sem]))
 			traceback.print_stack()
+	if tries >= 60:
+		print("[%d] unhung on lock after %d seconds (last holder: %s)" % (thread.get_ident(), tries, sem_msg[sem]))
+	sem_msg[sem] = "acquired semget"
+	return "OK"
 
 def log_error(str):
 	log.debug(str)
@@ -300,6 +306,64 @@ def imap_times_print(force=0):
 			log_info("imap_times[%s]: %d" % (key, total))
 		imap_times_last_print = now
 
+# this is intended to be a drop-in for imap.uid(), while
+# also allowing the imap object to reconnect in the event
+# of failures
+#
+# This hopefully just means that one of the connections
+# died.  This will try to reestablish it.
+def imap_uid(imap, cmd, arg1, arg2 = None, arg3 = None, arg4 = None):
+	tries = 3
+	ret = None
+	while ret == None:
+		tries = tries - 1
+		try:
+		        ret = imap.uid(cmd, arg1, arg2, arg3)
+		except Exception as e:
+			log_error("imap.uid() error: %s (tries left: %d)" % (str(e), tries))
+			imap.fs.kick_imap(imap)
+			if tries <= 0:
+				raise
+		except:
+			log_error("imap.uid() unknown error: (tries left: %d)" % (tries))
+			imap.fs.kick_imap(imap)
+			if tries <= 0:
+				raise
+	return ret
+
+def __imap_append(imap, fsNameVar, flags, now, msg):
+	tries = 3
+	rsp = None
+	data = None
+	while rsp == None:
+		tries = tries - 1
+		try:
+		        rsp, data = imap.append(fsNameVar, flags, now, msg)
+			log_debug2("__imap_append() try: %d rsp: '%s'" % (tries, rsp))
+			if rsp == "NO":
+				time.sleep(1)
+				rsp = None
+				continue
+		except RuntimeError as e:
+			log_error("imap.append() error: %s" % (str(e)))
+			imap.fs.kick_imap(imap)
+			if tries <= 0:
+				raise
+	return rsp, data
+
+def imap_getquotaroot(imap, fsNameVar):
+	tries = 2
+	ret = None
+	while ret == None:
+		try:
+		        ret = imap.getquotaroot(fsNameVar)
+		except RuntimeError as e:
+			log_error("imap.getquotaroot() error: %s" % (str(e)))
+			imap.fs.kick_imap(imap)
+			if tries <= 0:
+				raise
+		tries = tries - 1
+	return ret
 
 # The IMAP uid commands can take multiple uids and return
 # multiple results
@@ -318,11 +382,11 @@ def __uid_cmd(imap, cmd, uids, arg1, arg2 = None, arg3 = None):
 	uids_str = string.join(uids, ",")
 	start = time.time()
 	log_info("__uid_cmd(%s,...) %d uids" % (cmd, len(uids)))
-    	rsp, rsp_data = imap.uid(cmd, uids_str, arg1, arg2, arg3)
+    	rsp, rsp_data = imap_uid(imap, cmd, uids_str, arg1, arg2, arg3)
 	log_imap_time(cmd, start);
 	log_info("__uid_cmd(%s, [%s]) ret: '%s'" % (cmd, uids_str, rsp))
 	if rsp != "OK":
-		log_error("IMAP uid cmd (%s) error: %s" % (cmd, rsp))
+		log_error("IMAP uid cmd (%s, [%s]) error: %s" % (cmd, uids_str, rsp))
 		return None
 	ret = {}
 	uid_index = 0
@@ -400,7 +464,7 @@ def imap_append(info, imap, msg):
 	clear_rsp_cache()
 	start = time.time()
 	semget(imap.lock)
-    	rsp, data = imap.append(fsNameVar, "", now, str(msg))
+    	rsp, data = __imap_append(imap, fsNameVar, "", now, str(msg))
 	imap.lock.release()
 	log_imap_time("APPEND", start);
 	log_imap2("append for '%s': rsp,data: '%s' '%s'" % (info, rsp, data))
@@ -488,16 +552,18 @@ class testthread(Thread):
 		if not got_lock:
 			self.fs.dirty_objects.put(object)
 			return -1
+		sem_msg[object.writeout_lock] = "acquired write_out_object()"
 		reason = Dirtyable.dirty_reason(object)
     		start = time.time()
 		ret = write_out_nolock(object, "bdflushd")
     		end = time.time()
 		object.writeout_lock.release()
+		sem_msg[object.writeout_lock] += " released write_out_object()"
 		size = self.fs.dirty_objects.qsize()
 		# 0 means it got written out
 		# 1 means it was not dirty
 		took = end - start
-		msg =  "[%d] (%d sec), %%s %s because '%s' %d left" % (self.nr, took, object.to_str(), reason, size)
+		msg =  "[%d] (%2d sec), %%s %s because '%s' %d left" % (self.nr, took, object.to_str(), reason, size)
 		if ret == 0:
 			print(msg % ("wrote out"));
 		else:
@@ -521,7 +587,8 @@ class testthread(Thread):
 				# we can not get the lock.  Do
 				# not spin, sleep instead
 				if try_nr >= tries-1:
-					time.sleep(1)
+					#print("[%d] idle" % (self.nr))
+					time.sleep(5)
 
 	       	print "mythread done"
 
@@ -590,13 +657,14 @@ def _getMsguidsByQuery(about, imap, queries, or_query = 0):
     start = time.time()
     semget(imap.lock)
     try:
-        resp, msgids_list = imap.uid("SEARCH", None, queryString)
+        resp, msgids_list = imap_uid(imap, "SEARCH", None, queryString)
     except:
 	log_error("IMAP error on SEARCH")
 	log_error("queryString: ->%s<-" % (queryString))
 	print "\nIMAP exception ", sys.exc_info()[0]
     	exit(-1)
-    imap.lock.release()
+    finally:
+        imap.lock.release()
     log_imap_time("SEARCH", start);
     msgids = msgids_list[0].split(" ")
     log_imap2("search resp: %s msgids len: %d" % (resp, len(msgids)))
@@ -675,6 +743,8 @@ def fetch_full_messages(imap, msgids):
 
 def fetch_full_message(imap, msgid):
 	resp = fetch_full_messages(imap, [str(msgid)])
+	if resp == None:
+		return None
 	return resp[str(msgid)]
  
 def getSingleMessageByQuery(desc, imap, q):
@@ -707,7 +777,7 @@ def write_out_nolock(o, desc):
 	dirty_token = o.dirty()
 	if not dirty_token:
 		log_debug1("object is not dirty (%s), not writing out" % (str(dirty_token)))
-		print("object is not dirty (%s), not writing out" % (str(dirty_token)))
+		print("object is not dirty (token: %s), not writing out" % (str(dirty_token)))
 		return 1
 	#clear_msg = "none"
 	clear_msg = o.clear_dirty(dirty_token)
@@ -725,12 +795,17 @@ def write_out_nolock(o, desc):
 	return ret
 
 def write_out(o, desc):
-	if not semget(o.writeout_lock):
-		log_debug1("unable to get inode lock (%s)" % (desc))
-		# someone else is writing this out
-		return -2
-	ret = write_out_nolock(o, desc)
-	o.writeout_lock.release()
+	# I was seeing situations where a network error (SSL in this case)
+	# was raised.  It wasn't handled and the thread died while holding
+	# this lock.  This should at least make it release the lock before
+	# dying.
+	try:
+		semget(o.writeout_lock)
+		sem_msg[o.writeout_lock] = "acquired write_out()"
+		ret = write_out_nolock(o, desc)
+	finally:
+		o.writeout_lock.release()
+		sem_msg[o.writeout_lock] += " released write_out() in exception"
 	return ret
 
 class Dirtyable(object):
@@ -739,12 +814,13 @@ class Dirtyable(object):
 		self.dirty_reasons = Queue.Queue(1<<20)
 		self.dirty_mark = Queue.Queue(1)
 		self.writeout_lock = thread.allocate_lock()
+		sem_msg[self.writeout_lock] = "brand spankin new"
 
 	def dirty(self):
     		return self.dirty_reasons.qsize()
 
 	def dirty_reason(self):
-    		return "%s (%d more)" % (self.__dirty, self.dirty())
+    		return "%s (%d more reasons hidden)" % (self.__dirty, self.dirty())
 
 	def clear_dirty(self, nr):
 		msgs = []
@@ -863,7 +939,7 @@ class GmailInode(Dirtyable):
 	# use the inode_msg to fill in all these fields
 	self.fs = fs
 	self.xattr = {}
-	self.blocks = {}
+	self.i_blocks = {}
 	self.inode_cache_lock = thread.allocate_lock()
 	# protected by fs.inode_cache_lock
         self.pinned = 0
@@ -883,7 +959,7 @@ class GmailInode(Dirtyable):
             self.mtime = 0
             self.ctime = 0
             self.symlink_tgt = ""
-            self.blocksize = DefaultBlockSize
+            self.block_size = DefaultBlockSize
 	    # there are a couple of spots that depend
 	    # on having one of these around
 	    self.inode_msg = self.mk_inode_msg()
@@ -915,8 +991,11 @@ class GmailInode(Dirtyable):
 		log_debug("trashing old inode uid: %s new is: %s" % (i_orig_uid, i_msgid))
 		imap_trash_uids(imap, [str(i_orig_uid)])
     	if i_msgid <= 0:
-            e = OSError("Unable to write new inode message: '%s'" % (self.inode_msg['Subject']))
+            msg = "Unable to write new inode message: '%s'" % (self.inode_msg['Subject'])
+            e = OSError(msg)
+	    log_error(msg)
             e.errno = ENOSPC
+	    abort()
             raise e
     	# Uh oh.  Does this properly truncate data blocks that are no
 	# longer in use?
@@ -1019,7 +1098,7 @@ class GmailInode(Dirtyable):
         self.atime = int(m.group(5))
         self.mtime = int(m.group(6))
         self.ctime = int(m.group(7))
-        self.blocksize = int(m.group(8))
+        self.block_size = int(m.group(8))
 	symlink_tmp    = m.group(9)
 	self.symlink_tgt = _pathSeparatorDecode(symlink_tmp)
 	log_debug2("filled inode size: %d" % self.size)
@@ -1033,8 +1112,7 @@ class OpenGmailFile():
 		self.inode = inode
 		self.fs = self.inode.fs
 		self.users = 1
-        	self.blocksize = inode.blocksize
-		self.blocks = self.inode.blocks
+        	self.block_size = inode.block_size
 
 	def ts_cmp(self, a, b):
 	        return cmp(a.ts, b.ts) # compare as integers
@@ -1056,35 +1134,35 @@ class OpenGmailFile():
 					break
 				if block.dirty():
 					continue
-				del block.inode.blocks[block.block_nr]
+				del block.inode.i_blocks[block.block_nr]
 				del gmail_blocks[block]
 		self.inode.fs.inode_cache_lock.release()
 		#print("[%d] file now has %d blocks" % (time.time(), len(self.inode.blocks)))
 
 
     	def write(self, buf, off):
-		first_block = off / self.blocksize
-		last_block = (off + len(buf)) / self.blocksize
+		first_block = off / self.block_size
+		last_block = (off + len(buf)) / self.block_size
 
 		semget(self.inode.fs.inode_cache_lock)
 		for i in range(first_block, last_block+1):
-			if not self.blocks.has_key(i):
-				self.blocks[i] = GmailBlock(self.inode, i);
-			self.blocks[i].write(buf, off)
+			if not self.inode.i_blocks.has_key(i):
+				self.inode.i_blocks[i] = GmailBlock(self.inode, i);
+			self.inode.i_blocks[i].write(buf, off)
 		self.inode.fs.inode_cache_lock.release()
 		self.prune()
 		return len(buf)
 
     	def read(self, readlen, off):
-		first_block = off / self.blocksize
-		last_block = (off + readlen) / self.blocksize
+		first_block = off / self.block_size
+		last_block = (off + readlen) / self.block_size
 
 		ret = []
 		semget(self.inode.fs.inode_cache_lock)
 		for i in range(first_block, last_block+1):
-			if not self.blocks.has_key(i):
-				self.blocks[i] = GmailBlock(self.inode, i);
-			ret += self.blocks[i].read(readlen, off)
+			if not self.inode.i_blocks.has_key(i):
+				self.inode.i_blocks[i] = GmailBlock(self.inode, i);
+			ret += self.inode.i_blocks[i].read(readlen, off)
 		self.inode.fs.inode_cache_lock.release()
 		self.prune()
 		return ret
@@ -1112,13 +1190,13 @@ class GmailBlock(Dirtyable):
         self.inode = inode
 	self.fs = self.inode.fs
 
-        self.blocksize = inode.blocksize
+        self.block_size = inode.block_size
         self.buffer = []
 	self.buffer_lock = threading.Semaphore(1)
-	#list(" "*self.blocksize)
+	#list(" "*self.block_size)
         self.block_nr = block_nr
-        self.start_offset = self.block_nr * self.blocksize
-        self.end_offset = self.start_offset + self.blocksize
+        self.start_offset = self.block_nr * self.block_size
+        self.end_offset = self.start_offset + self.block_size
 	self.ts = time.time()
 	log_debug1("created new block: %d" % (self.block_nr))
 	gmail_blocks[self] = self
@@ -1143,7 +1221,7 @@ class GmailBlock(Dirtyable):
 	    buf = buf[to_chop:]
 	    off = self.start_offset
 	if off + len(buf) > self.end_offset:
-	    new_len = self.blocksize - offset
+	    new_len = self.block_size - offset
 	    buf = buf[:new_len]
 	return buf, off
 
@@ -1154,13 +1232,13 @@ class GmailBlock(Dirtyable):
 		return
 	log_debug1("my part of buffer: %d bytes, at offset: %d" % (len(buf_part), file_off))
 
-	if (len(buf_part) == self.blocksize or
+	if (len(buf_part) == self.block_size or
  	    off > self.inode.size):
 	    # If we're going to write the whole buffer, do
 	    # not bother fetching what we will write over
 	    # entirely anyway.
 	    semget(self.buffer_lock)
-	    self.buffer = list(" "*self.blocksize)
+	    self.buffer = list(" "*self.block_size)
 	    self.buffer_lock.release()
         else:
 	    self.populate_buffer(1)
@@ -1207,8 +1285,8 @@ class GmailBlock(Dirtyable):
 	semget(self.buffer_lock)
 	buf = self.buffer
 	self.buffer_lock.release()
-	if self.inode.size / self.blocksize == self.block_nr:
-		part = self.inode.size % self.blocksize
+	if self.inode.size / self.block_size == self.block_nr:
+		part = self.inode.size % self.block_size
 		print("on last block, so only writing out %d/%d bytes of block" % (part, len(buf)))
 		buf = buf[:part]
 
@@ -1223,7 +1301,7 @@ class GmailBlock(Dirtyable):
 	imap = self.fs.get_imap()
 	msgid = imap_append("commit data blocks (%d bytes)" % len(str(msg)), self.inode.fs.imap, msg)
 	self.fs.put_imap(imap)
-	log_debug("f_write_out() finished, rsp: '%s'" % str(msgid))
+	log_debug("b_write_out() finished, rsp: '%s'" % str(msgid))
 	if msgid > 0:
             log_debug("Sent write commit ok")
             self.inode.mark_dirty("commit data block")
@@ -1264,7 +1342,7 @@ class GmailBlock(Dirtyable):
         msg = getSingleMessageByQuery("block read", self.inode.fs.imap, [ q1, q2 ])
 	if msg == None:
 	    log_debug2("readFromGmail(): file has no blocks, returning empty contents (%s %s)" % (q1, q2))
-	    self.buffer = list(" "*self.blocksize)
+	    self.buffer = list(" "*self.block_size)
 	    self.buffer_lock.release()
 	    return
         log_debug2("got msg with subject:"+msg['Subject'])
@@ -1282,7 +1360,7 @@ class GmailBlock(Dirtyable):
 
         if deleteAfter:
             imap_trash_msg(self.inode.fs.imap, msg)
-        contentList = list(" "*self.blocksize)
+        contentList = list(" "*self.block_size)
         contentList[0:] = a
         self.buffer = contentList
 	print("populate_buffer() filled block %d with len: %d" % (self.block_nr, len(self.buffer)))
@@ -1293,8 +1371,25 @@ class GmailBlock(Dirtyable):
 #@+node:class Gmailfs
 class Gmailfs(Fuse):
 
+    def kick_imap(self, imap):
+	try:
+		self.disconnect_from_server(imap)
+	except:
+		pass
+	self.connect_to_server(imap)
+
+    def disconnect_from_server(self, imap):
+	try:
+		imap.close()
+	except:
+		pass
+	try:
+		imap.logout()
+	except:
+		pass
+
     #@	@+others
-    def connect_to_server(self):
+    def connect_to_server(self, imap = None):
         global fsNameVar
         global password
         global username
@@ -1302,9 +1397,14 @@ class Gmailfs(Fuse):
 	fsNameVar = DefaultFsname
         password = DefaultPassword
         username = DefaultUsername
-        imap = imaplib.IMAP4_SSL("imap.gmail.com", 993);#libgmail.GmailAccount(username, password)
+	if imap == None:
+	        imap = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+		imap.fs = self
+		imap.lock = threading.Semaphore(1)
+	else:
+		imap.open("imap.gmail.com", 993) #libgmail.GmailAccount(username, password)
         if username.find("@")<0:
-            username = username+"@gmail.com"
+		username = username+"@gmail.com"
         imap.login(username, password)
 	resp, data = imap.select(fsNameVar)
 	log_debug1("folder select '%s' resp: '%s' data: '%s'" % (fsNameVar, resp, data))
@@ -1315,7 +1415,6 @@ class Gmailfs(Fuse):
 		resp, data = imap.select(fsNameVar)
 		log_debug1("select2 '%s' resp: '%s' data: '%s'" % (fsNameVar, resp, data))
 		return
-	imap.lock = threading.Semaphore(1)
 	return imap
 
     def get_imap(self):
@@ -1411,7 +1510,7 @@ class Gmailfs(Fuse):
 	if trash_all:
 		print("deleting existing messages...")
 		semget(self.imap.lock)
-		resp, msgids = self.imap.uid("SEARCH", 'ALL')
+		resp, msgids = imap_uid(self.imap, "SEARCH", 'ALL')
 		self.imap.lock.release()
 		uids = msgids[0].split()
 		print ("%d found..." % (len(uids)))
@@ -1421,13 +1520,13 @@ class Gmailfs(Fuse):
 			imap_trash_uids(self.imap, uids)
 		print("done deleting %d existing messages" % (len(msgids[0].split())))
 		semget(self.imap.lock)
-		resp, msgids = self.imap.uid("SEARCH", 'ALL')
+		resp, msgids = imap_uid(self.imap, "SEARCH", 'ALL')
 		self.imap.lock.release()
 		print("mailbox now has %d messages" % (len(msgids[0].split())))
 		self.imap.expunge()
 
 	semget(self.imap.lock)
-	resp, msgids = self.imap.uid("SEARCH", 'ALL')
+	resp, msgids = imap_uid(self.imap, "SEARCH", 'ALL')
 	self.imap.lock.release()
 	print("mailbox now has %d messages" % (len(msgids[0].split())))
 	#exit(0)
@@ -1877,7 +1976,7 @@ class Gmailfs(Fuse):
     def mk_dirent(self, inode, path):
 	if self.dirent_cache.has_key(path):
 		log_debug("dirent cache hit on path: '%s'" % (path))
-		return self.dirent_cache[dirent.path()]
+		return self.dirent_cache[path]
 	# this should keep us from racing with lookup_dirent()
 	semget(self.lookup_lock)
 	filename, dir = parse_path(path)
@@ -2030,7 +2129,7 @@ class Gmailfs(Fuse):
 	# [['"linux_fs_3" ""'], ['"" (STORAGE 368 217307895)']]
 	# numbers are in 1k-sized blocks
 	imap = self.get_imap()
-	resp, data = imap.getquotaroot(fsNameVar)
+	resp, data = imap_getquotaroot(imap, fsNameVar)
 	self.put_imap(imap)
 	storage = data[1][0]
 	m = re.match('"" \(STORAGE (.*) (.*)\)', storage)
@@ -2083,8 +2182,9 @@ class Gmailfs(Fuse):
         log_info("gmailfs.py:Gmailfs:fsync: path=%s, isfsyncfile=%s" % (path, isfsyncfile))
         inode = self.lookup_inode(path)
         f = self.openfiles[path]
-        write_out(f, "fsync")
-	write_out(inode, "fsync")
+	write_out(inode, "fsync_inode")
+	#for block in inode._blocks:
+	#        write_out(block, "fsync_blocks")
         return 0
     #@-node:fsync
 
