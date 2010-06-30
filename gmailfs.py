@@ -543,7 +543,7 @@ class testthread(Thread):
 			# block, and timeout after 1 second
 			object = self.fs.dirty_objects.get(1, 1)
 		except:
-			# effectively success
+			# effectively success if we timeout
 			return 0
 		# we do not want to sit here sleeping on objects
 		# so if we can not get the lock, move on to another
@@ -570,27 +570,45 @@ class testthread(Thread):
 			print(msg % ("did not write"));
 		return 1
 
+	def run_writeout(self):
+		tries = 5
+		for try_nr in range(tries):
+			writeout_threads[thread.get_ident()] = "running"
+			ret = self.write_out_object()
+			#rint("writeout ret: '%s'" % (ret))
+			if ret == 0:
+				writeout_threads[thread.get_ident()] = "idle"
+				msg = "["
+				for t in range(self.fs.nr_imap_threads):
+					if t >= 1:
+						msg += " "
+					if writeout_threads[thread.get_ident()] == "idle":
+						msg += str(t)
+					else:
+						msg += " "
+				msg += "] idle\r"
+				sys.stderr.write(msg)
+				sys.stderr.flush()
+			if ret >= 0:
+				break
+			# this will happen when there are
+			# objects in the queue for which
+			# we can not get the lock.  Do
+			# not spin, sleep instead
+			if try_nr < tries-1:
+				continue
+
+			time.sleep(1)
+
 	def run(self):
 		global do_writeout
 		writeout_threads[thread.get_ident()] = 1
 		log_debug1("mythread: started pid: %d" % (os.getpid()))
-		print "connected"
-		log_debug1("connected")
+		print "connected[%d]" % (self.nr)
+		log_debug1("connected[%d]" % (self.nr))
 		while do_writeout:
-			tries = 5
-			for try_nr in range(tries):
-				ret = self.write_out_object()
-				if ret >= 0:
-					break
-				# this will happen when there are
-				# objects in the queue for which
-				# we can not get the lock.  Do
-				# not spin, sleep instead
-				if try_nr >= tries-1:
-					#print("[%d] idle" % (self.nr))
-					time.sleep(5)
-
-	       	print "mythread done"
+			self.run_writeout()
+	       	print "thread[%d] done" % (self.nr)
 
     #@-node:mythread
 
@@ -1506,7 +1524,8 @@ class Gmailfs(Fuse):
 	# messages with the given label
 	#self.imap.debug = 4
 	trash_all = 0
-	#trash_all = 1
+	if os.environ["IMAPFS_TRASH_ALL"] != None:
+		trash_all = 1
 	if trash_all:
 		print("deleting existing messages...")
 		semget(self.imap.lock)
