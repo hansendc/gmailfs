@@ -60,7 +60,14 @@ GmailFS provides a filesystem using a Google Gmail account as its storage medium
 #@+node:imports
 
 import pprint
-import fuse
+
+try:
+	import fuse
+except ImportError, e:
+	print e
+	print "Are you sure you sure fuse is built into the kernel or loaded as a module?"
+	print "In a linux shell type \"lsmod | grep fuse\" to find out."
+	
 import imaplib
 import email
 import random
@@ -76,7 +83,7 @@ import os
 from threading import Thread
 import threading
 import thread
-from errno import *
+from errno import * # NOTE: wildcard star imports considered evil, namespace pollution
 from stat import *
 from os.path import abspath, expanduser, isfile
 
@@ -85,7 +92,6 @@ fuse.fuse_python_api = (0, 2)
 
 import thread
 import quopri
-from lgconstants import *
 
 import sys,traceback,re,string,time,tempfile,array,logging,logging.handlers
 
@@ -319,7 +325,7 @@ def imap_uid(imap, cmd, arg1, arg2 = None, arg3 = None, arg4 = None):
 		tries = tries - 1
 		try:
 		        ret = imap.uid(cmd, arg1, arg2, arg3)
-		except Exception as e:
+		except Exception, e:
 			log_error("imap.uid() error: %s (tries left: %d)" % (str(e), tries))
 			imap.fs.kick_imap(imap)
 			if tries <= 0:
@@ -344,7 +350,7 @@ def __imap_append(imap, fsNameVar, flags, now, msg):
 				time.sleep(1)
 				rsp = None
 				continue
-		except RuntimeError as e:
+		except RuntimeError, e:
 			log_error("imap.append() error: %s" % (str(e)))
 			imap.fs.kick_imap(imap)
 			if tries <= 0:
@@ -357,7 +363,7 @@ def imap_getquotaroot(imap, fsNameVar):
 	while ret == None:
 		try:
 		        ret = imap.getquotaroot(fsNameVar)
-		except RuntimeError as e:
+		except RuntimeError, e:
 			log_error("imap.getquotaroot() error: %s" % (str(e)))
 			imap.fs.kick_imap(imap)
 			if tries <= 0:
@@ -1524,7 +1530,7 @@ class Gmailfs(Fuse):
 	# messages with the given label
 	#self.imap.debug = 4
 	trash_all = 0
-	if os.environ["IMAPFS_TRASH_ALL"] != None:
+	if "IMAPFS_TRASH_ALL" in os.environ:
 		trash_all = 1
 	if trash_all:
 		print("deleting existing messages...")
