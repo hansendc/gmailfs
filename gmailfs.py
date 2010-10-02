@@ -67,13 +67,13 @@ except ImportError, e:
 	print e
 	print "Are you sure you sure fuse is built into the kernel or loaded as a module?"
 	print "In a linux shell type \"lsmod | grep fuse\" to find out."
-	
+
 import imaplib
 import email
 import random
 from email import encoders
 from email.mime.multipart import MIMEMultipart
-from email.MIMEText import MIMEText 
+from email.MIMEText import MIMEText
 from email.mime.base import MIMEBase
 
 
@@ -415,7 +415,7 @@ def __uid_cmd(imap, cmd, uids, arg1, arg2 = None, arg3 = None):
 		uid = uids[uid_index]
 		uid_index += 1
 		if data == None:
-			log_info("uid_cmd(%s) got strange result %s/%s" % 
+			log_info("uid_cmd(%s) got strange result %s/%s" %
 					(cmd, rsp_nr, range(len(rsp_data))))
 			continue
 		desc = data[0]
@@ -514,7 +514,7 @@ def GmailConfig(fname):
           DefaultFsname = cp.get("filesystem", "fsname")
     else:
       log_warning("Using default file system (Dangerous!)")
-      
+
     if "logs" in sections:
       options = cp.options("logs")
       if "level" in options:
@@ -642,7 +642,7 @@ def fixQuotedPrintable(body):
     fixed = body
     if re.search("Content-Transfer-Encoding: quoted",body):
         fixed = quopri.decodestring(body)
-    # Map unicode     
+    # Map unicode
     return fixed.replace('\u003d','=')
 
 def psub(s):
@@ -770,7 +770,7 @@ def fetch_full_message(imap, msgid):
 	if resp == None:
 		return None
 	return resp[str(msgid)]
- 
+
 def getSingleMessageByQuery(desc, imap, q):
 	log_debug2("getSingleMessageByQuery(%s)" % (desc))
 	msgid = getSingleMsguidByQuery(imap, q)
@@ -1208,7 +1208,7 @@ class GmailBlock(Dirtyable):
     """
     Class holding any currently open files, includes cached instance of the last data block retrieved
     """
-    
+
     def __init__(self, inode, block_nr):
         Dirtyable.__init__(self)
         self.inode = inode
@@ -1284,7 +1284,7 @@ class GmailBlock(Dirtyable):
 	self.buffer[buf_write_start:buf_write_end] = buf_part;
 	self.buffer_lock.release()
 	log_debug1("wrote block range: [%d:%d]" % (buf_write_start, buf_write_end))
-	
+
 	log_debug1("block write() setting dirty")
 	self.mark_dirty("file write")
 
@@ -1349,7 +1349,7 @@ class GmailBlock(Dirtyable):
 
 	self.ts = time.time()
 	return self.buffer[start_offset:end_offset]
-	
+
     def populate_buffer(self, deleteAfter):
         """
         Read this data block with from gmail.  If 'deleteAfter' is
@@ -1559,7 +1559,7 @@ class Gmailfs(Fuse):
 
         pass
     #@-node:__init__
-    
+
     #@+node:attribs
     flags = 1
 
@@ -1775,9 +1775,9 @@ class Gmailfs(Fuse):
         parentdirinode = self.lookup_inode(parentdir)
         parentdirinode.dec_nlink()
         return 0
-        
+
     #@-node:rmdir
-    
+
     #@+node:symlink
     def symlink(self, oldpath, newpath):
         log_debug1("symlink: oldpath='%s', newpath='%s'" % (oldpath, newpath))
@@ -1888,7 +1888,7 @@ class Gmailfs(Fuse):
 	self.put_inode(inode)
 
     #@-node:rename
-    
+
     #@+node:link
     def link(self, old_path, new_path):
         log_entry("hard link: old_path='%s', new_path='%s'" % (old_path, new_path))
@@ -1901,7 +1901,7 @@ class Gmailfs(Fuse):
 	link_to(new_path, inode)
         return 0
     #@-node:link
-    
+
     #@+node:chmod
     def chmod(self, path, mode):
         log_entry("chmod('%s', %o)" % (path, mode))
@@ -2084,7 +2084,7 @@ class Gmailfs(Fuse):
     def read(self, path, readlen, offset):
 	log_entry("read")
         try:
- 	    log_debug1("gmailfs.py:Gmailfs:read(len=%d, offset=%d, path='%s')" 
+ 	    log_debug1("gmailfs.py:Gmailfs:read(len=%d, offset=%d, path='%s')"
 			    % (readlen, offset, path))
             f = self.openfiles[path]
             buf = f.read(readlen,offset)
@@ -2229,7 +2229,7 @@ class Gmailfs(Fuse):
 	#write_out(dirent.inode, "flush")
         return 0
     #@-node:fsync
-   
+
     def fetch_dirent_msgs_for_path(self, dir_path):
 	log_debug2("fetch_dirent_msgs_for_path('%s')" % (dir_path))
 	encoded_path = _pathSeparatorEncode(dir_path)
@@ -2448,7 +2448,7 @@ def main(mountpoint, namedOptions):
 
 if __name__ == '__main__':
     main(1, "2")
-    
+
 #@-node:mainline
 #@-others
 #@-node:@file gmailfs.py
