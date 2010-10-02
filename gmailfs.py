@@ -1980,7 +1980,7 @@ class Gmailfs(Fuse):
 	if size == 0:
 		# We are asked for size of the attr list, ie. joint size of attrs
 		# plus null separators.
-		return len("".join(aa)) + len(aa)
+		return len("".join(attrs)) + len(attrs)
     	log_debug1("all attrs: (%s)" % (string.join(attrs, ", ")))
 	return attrs
     #@-node:listxattr
